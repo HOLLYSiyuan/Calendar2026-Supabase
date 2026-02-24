@@ -148,7 +148,7 @@ const THEMES={
   gq:{bg:"linear-gradient(135deg,#2D0808,#6B1010 50%,#2D0808)",a:"#F87171",tx:"#FEE2E2",p:"万里河山披锦绣，千秋岁月铸辉煌",au:""},
 };
 const DEF_USERS={
-  chensiyuan:{pw:"csy2026!",name:"陈思元",role:"科长",dept:"综合管理科",main:true},
+  chensiyuan:{pw:"csy2026!",name:"陈思元",role:"省委党校",dept:"干部",main:true},
   sub1:{pw:"user001",name:"子用户1",role:"主任科员",dept:"办公室",main:false},
   sub2:{pw:"user002",name:"子用户2",role:"一级科员",dept:"政策法规处",main:false},
   sub3:{pw:"user003",name:"子用户3",role:"二级科员",dept:"人事教育科",main:false},
