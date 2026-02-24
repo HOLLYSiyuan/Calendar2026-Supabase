@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>政务日历 2026 · Supabase云同步版</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏛️</text></svg>"/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Noto Sans SC',system-ui,sans-serif;background:#F8F7F4}
+*{scrollbar-width:thin;scrollbar-color:#D1CCC4 transparent}
+*::-webkit-scrollbar{width:5px}*::-webkit-scrollbar-thumb{background:#D1CCC4;border-radius:3px}
+input::placeholder,textarea::placeholder{color:#C4C0B8}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideIn{from{transform:translateX(24px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes slideR{from{transform:translateX(14px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes modalIn{from{transform:scale(.94) translateY(6px);opacity:0}to{transform:scale(1) translateY(0);opacity:1}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes fl{0%,100%{transform:translateY(0)}50%{transform:translateY(-18px)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef}=React;
+
+/*╔══════════════════════════════════════════════════════════════╗
+  ║  ★★★  Supabase 云同步配置  ★★★                              ║
+  ║                                                              ║
+  ║  配置步骤（5分钟）：                                           ║
+  ║  1. 打开 supabase.com → 用 GitHub 账号登录                    ║
+  ║  2. New Project → 填名称/密码 → 地区选 Northeast Asia (Tokyo)  ║
+  ║  3. 等待项目创建完成（约1分钟）                                 ║
+  ║  4. 左侧 SQL Editor → New Query → 粘贴下方建表语句并执行：      ║
+  ║                                                              ║
+  ║     create table gov_cal (                                    ║
+  ║       key text primary key,                                   ║
+  ║       value text not null default '',                         ║
+  ║       updated_at timestamptz default now()                    ║
+  ║     );                                                       ║
+  ║     alter table gov_cal enable row level security;            ║
+  ║     create policy "允许所有操作" on gov_cal                     ║
+  ║       for all using (true) with check (true);                 ║
+  ║                                                              ║
+  ║  5. 左侧 Project Settings → API → 复制以下 2 个值填入下方：     ║
+  ╚══════════════════════════════════════════════════════════════╝*/
+
+const SUPABASE = {
+  url:  "https://vvugdhihtdhxpjqdqqza.supabase.co",  // ← 粘贴 Project URL
+  key:  "sb_publishable_kdO8V9PYdpfOm-9ahCoHbQ_HVJjnT-g",              // ← 粘贴 anon public key
+};
+// 填入后自动启用云同步；留空则使用本地存储（单机模式）
+
+const CLOUD_OK = !!(SUPABASE.url && SUPABASE.key);
+
+/* ===== 云存储层：Supabase REST API + localStorage 缓存 ===== */
+const DB = {
+  _hdr: function(){return{"apikey":SUPABASE.key,"Authorization":"Bearer "+SUPABASE.key,"Content-Type":"application/json","Prefer":"return=representation"};},
+  _api: function(query){return SUPABASE.url+"/rest/v1/gov_cal"+query;},
+
+  // 读取单条
+  async cloudGet(key){
+    if(!CLOUD_OK) return null;
+    try{
+      var r=await fetch(this._api("?key=eq."+encodeURIComponent(key)+"&select=value&limit=1"),{headers:this._hdr()});
+      var d=await r.json();
+      if(Array.isArray(d)&&d.length>0) return d[0].value;
+    }catch(e){console.warn("云端读取失败:",e);}
+    return null;
+  },
+
+  // 写入（upsert：存在则更新，不存在则创建）
+  async cloudSet(key,value){
+    if(!CLOUD_OK) return;
+    try{
+      await fetch(this._api(""),{method:"POST",headers:Object.assign({},this._hdr(),{"Prefer":"resolution=merge-duplicates,return=minimal"}),
+        body:JSON.stringify({key:key,value:value,updated_at:new Date().toISOString()})});
+    }catch(e){console.warn("云端写入失败:",e);}
+  },
+
+  // 批量读取全部
+  async cloudFetchAll(){
+    if(!CLOUD_OK) return {};
+    try{
+      var r=await fetch(this._api("?select=key,value&limit=1000"),{headers:this._hdr()});
+      var d=await r.json();var map={};
+      if(Array.isArray(d)) d.forEach(function(item){map[item.key]=item.value;});
+      return map;
+    }catch(e){console.warn("云端批量读取失败:",e);return {};}
+  },
+
+  // 统一读取：优先云端，回退本地
+  async get(key){
+    if(CLOUD_OK){var v=await this.cloudGet(key);if(v!==null){localStorage.setItem("gcal_"+key,v);return{value:v};}}
+    try{var lv=localStorage.getItem("gcal_"+key);return lv?{value:lv}:null;}catch(e){return null;}
+  },
+
+  // 统一写入：同时写本地+云端
+  async set(key,value){
+    try{localStorage.setItem("gcal_"+key,value);}catch(e){}
+    await this.cloudSet(key,value);
+  },
+
+  // 本地快速读取
+  localGet(key){try{var v=localStorage.getItem("gcal_"+key);return v?{value:v}:null;}catch(e){return null;}},
+};
+
+/* ===== 常量数据 ===== */
+const M_CN=["一月","二月","三月","四月","五月","六月","七月","八月","九月","十月","十一月","十二月"];
+const WD=["一","二","三","四","五","六","日"];
+const HOL={
+  "1-1":{n:"元旦",t:"yd",e:"🎊"},"1-2":{n:"元旦",t:"yd",e:"🎊"},"1-3":{n:"元旦",t:"yd",e:"🎊"},
+  "2-15":{n:"腊月廿八",t:"cj",e:"🏮"},"2-16":{n:"除夕",t:"cj",e:"🧨"},"2-17":{n:"初一",t:"cj",e:"🐍"},
+  "2-18":{n:"初二",t:"cj",e:"🏮"},"2-19":{n:"初三",t:"cj",e:"🏮"},"2-20":{n:"初四",t:"cj",e:"🧧"},
+  "2-21":{n:"初五",t:"cj",e:"🧧"},"2-22":{n:"初六",t:"cj",e:"🧧"},"2-23":{n:"初七",t:"cj",e:"🏮"},
+  "4-4":{n:"清明",t:"qm",e:"🌿"},"4-5":{n:"清明",t:"qm",e:"🌿"},"4-6":{n:"清明",t:"qm",e:"🌿"},
+  "5-1":{n:"劳动节",t:"ld",e:"💪"},"5-2":{n:"劳动节",t:"ld",e:"🌺"},"5-3":{n:"劳动节",t:"ld",e:"🌺"},
+  "5-4":{n:"青年节",t:"ld",e:"🌟"},"5-5":{n:"劳动节",t:"ld",e:"🌺"},
+  "6-19":{n:"端午",t:"dw",e:"🐉"},"6-20":{n:"端午",t:"dw",e:"🐉"},"6-21":{n:"端午",t:"dw",e:"🐉"},
+  "9-25":{n:"中秋",t:"zq",e:"🥮"},"9-26":{n:"中秋",t:"zq",e:"🌕"},"9-27":{n:"中秋",t:"zq",e:"🌕"},
+  "10-1":{n:"国庆",t:"gq",e:"🇨🇳"},"10-2":{n:"国庆",t:"gq",e:"🎆"},"10-3":{n:"国庆",t:"gq",e:"🎆"},
+  "10-4":{n:"国庆",t:"gq",e:"🎆"},"10-5":{n:"国庆",t:"gq",e:"🎆"},"10-6":{n:"国庆",t:"gq",e:"🎆"},"10-7":{n:"国庆",t:"gq",e:"🎆"},
+};
+const MAKEUP={"1-4":1,"2-14":1,"2-28":1,"5-9":1,"9-20":1,"10-10":1};
+const CATS=[
+  {k:"meeting",l:"会议/学习",i:"📋",c:"#3B82F6",b:"#EFF6FF"},
+  {k:"document",l:"公文/审批",i:"📝",c:"#10B981",b:"#ECFDF5"},
+  {k:"deadline",l:"重点/截止",i:"⏰",c:"#F59E0B",b:"#FFFBEB"},
+  {k:"duty",l:"值班/外勤",i:"🏛️",c:"#8B5CF6",b:"#F5F3FF"},
+  {k:"training",l:"培训/考核",i:"🎓",c:"#EC4899",b:"#FDF2F8"},
+  {k:"reception",l:"接待/调研",i:"👥",c:"#06B6D4",b:"#ECFEFF"},
+  {k:"report",l:"汇报/总结",i:"📊",c:"#F97316",b:"#FFF7ED"},
+  {k:"personal",l:"提醒/个人",i:"🔔",c:"#64748B",b:"#F8FAFC"},
+];
+const PRI=["普通","重要","紧急"];
+const STA=[{l:"待办",i:"○",c:"#94A3B8"},{l:"进行中",i:"◐",c:"#3B82F6"},{l:"已完成",i:"✓",c:"#10B981"},{l:"已延期",i:"→",c:"#F59E0B"},{l:"已取消",i:"✗",c:"#EF4444"}];
+const THEMES={
+  cj:{bg:"linear-gradient(135deg,#1A0505,#4A0E0E 50%,#1A0505)",a:"#FF6B6B",tx:"#FECACA",p:"爆竹声中一岁除，春风送暖入屠苏",au:"王安石"},
+  qm:{bg:"linear-gradient(135deg,#0A1F15,#0E2E1C 50%,#0A1F15)",a:"#6EE7B7",tx:"#D1FAE5",p:"清明时节雨纷纷，路上行人欲断魂",au:"杜牧"},
+  dw:{bg:"linear-gradient(135deg,#051525,#0A2540 50%,#051525)",a:"#7DD3FC",tx:"#E0F2FE",p:"轻汗微微透碧纨，明朝端午浴芳兰",au:"苏轼"},
+  ld:{bg:"linear-gradient(135deg,#1A1005,#2E1E08 50%,#1A1005)",a:"#FCD34D",tx:"#FEF3C7",p:"锄禾日当午，汗滴禾下土",au:"李绅"},
+  yd:{bg:"linear-gradient(135deg,#0F0A2E,#1A1145 50%,#0F0A2E)",a:"#A5B4FC",tx:"#E0E7FF",p:"千门万户曈曈日，总把新桃换旧符",au:"王安石"},
+  zq:{bg:"linear-gradient(135deg,#1A1005,#2A1A08 50%,#1A1005)",a:"#FBBF24",tx:"#FEF3C7",p:"但愿人长久，千里共婵娟",au:"苏轼"},
+  gq:{bg:"linear-gradient(135deg,#2D0808,#6B1010 50%,#2D0808)",a:"#F87171",tx:"#FEE2E2",p:"万里河山披锦绣，千秋岁月铸辉煌",au:""},
+};
+const DEF_USERS={
+  chensiyuan:{pw:"csy2026!",name:"陈思元",role:"科长",dept:"综合管理科",main:true},
+  sub1:{pw:"user001",name:"子用户1",role:"主任科员",dept:"办公室",main:false},
+  sub2:{pw:"user002",name:"子用户2",role:"一级科员",dept:"政策法规处",main:false},
+  sub3:{pw:"user003",name:"子用户3",role:"二级科员",dept:"人事教育科",main:false},
+  sub4:{pw:"user004",name:"子用户4",role:"科员",dept:"财务审计科",main:false},
+};
+const REM_OPTS=[{m:0,l:"准时"},{m:5,l:"5分钟前"},{m:15,l:"15分钟前"},{m:30,l:"30分钟前"},{m:60,l:"1小时前"},{m:1440,l:"1天前"}];
+
+function gH(m,d){return HOL[(m+1)+"-"+d]||null;}
+function isMU(m,d){return MAKEUP[(m+1)+"-"+d]||false;}
+function isWE(m,d){var x=new Date(2026,m,d).getDay();return x===0||x===6;}
+function dIn(m){return new Date(2026,m+1,0).getDate();}
+function fDay(m){var d=new Date(2026,m,1).getDay();return d===0?6:d-1;}
+function dkk(m,d){return(m+1)+"-"+d;}
+
+function parseNL(text){
+  var now=new Date(),m=now.getMonth(),d=now.getDate(),time="09:00",title=text,cat="meeting";
+  if(text.indexOf("明天")>=0){d+=1;title=title.replace("明天","");}
+  if(text.indexOf("后天")>=0){d+=2;title=title.replace("后天","");}
+  if(text.indexOf("今天")>=0){title=title.replace("今天","");}
+  var dm=text.match(/(\d{1,2})月(\d{1,2})[日号]/);
+  if(dm){m=parseInt(dm[1])-1;d=parseInt(dm[2]);title=title.replace(dm[0],"");}
+  var tm=text.match(/(上午|下午|早上|晚上)?(\d{1,2})[点时:](\d{0,2})/);
+  if(tm){var h=parseInt(tm[2]),mi=tm[3]?parseInt(tm[3]):0;
+    if((tm[1]==="下午"||tm[1]==="晚上")&&h<12)h+=12;
+    time=String(h).padStart(2,"0")+":"+String(mi).padStart(2,"0");title=title.replace(tm[0],"");}
+  var kw={"会议":"meeting","开会":"meeting","学习":"meeting","培训":"training","汇报":"report",
+    "审批":"document","公文":"document","值班":"duty","调研":"reception","截止":"deadline","提醒":"personal"};
+  Object.keys(kw).forEach(function(k){if(text.indexOf(k)>=0)cat=kw[k];});
+  title=title.replace(/[，。、！？\s]+/g," ").trim()||"新事项";
+  var dt=new Date(2026,m,d);
+  return{title:title,category:cat,time:time,month:dt.getMonth(),day:dt.getDate(),priority:text.indexOf("紧急")>=0?2:text.indexOf("重要")>=0?1:0};
+}
+
+function Splash(props){
+  var ref=useRef(null);
+  useEffect(function(){
+    if(!props.trigger||!props.type||!ref.current)return;
+    var el=ref.current;el.innerHTML="";
+    var cols={cj:["#FF6B6B","#FCA5A5","#FBBF24"],qm:["#6EE7B7","#34D399"],dw:["#7DD3FC","#38BDF8"],ld:["#FCD34D","#FBBF24"],yd:["#A5B4FC","#818CF8"],zq:["#FBBF24","#F59E0B"],gq:["#F87171","#EF4444"]};
+    var c=cols[props.type]||cols.yd;
+    for(var i=0;i<16;i++){var dot=document.createElement("div");var sz=3+Math.random()*10;var angle=(Math.PI*2*i)/16;var dist=30+Math.random()*60;var dx=Math.cos(angle)*dist;var dy=Math.sin(angle)*dist;
+      dot.style.cssText="position:absolute;left:50%;top:50%;width:"+sz+"px;height:"+sz+"px;border-radius:50%;background:"+c[i%c.length]+";opacity:0;pointer-events:none;";
+      dot.animate([{opacity:0,transform:"translate(-50%,-50%) scale(.5)"},{opacity:.5,transform:"translate(-50%,-50%) scale(1)",offset:.2},{opacity:0,transform:"translate(calc(-50% + "+dx+"px),calc(-50% + "+dy+"px)) scale(1.5)"}],{duration:600+Math.random()*500,delay:Math.random()*200,easing:"ease-out",fill:"forwards"});
+      el.appendChild(dot);}
+    var t=setTimeout(function(){if(el)el.innerHTML="";},2000);return function(){clearTimeout(t);};
+  },[props.trigger,props.type]);
+  return <div ref={ref} style={{position:"absolute",inset:0,pointerEvents:"none",zIndex:10,overflow:"hidden"}}/>;
+}
+
+function LoginPage(props){
+  var _u=useState(""),un=_u[0],sU=_u[1];var _p=useState(""),pw=_p[0],sP=_p[1];var _e=useState(""),er=_e[0],sE=_e[1];var _l=useState(false),ld=_l[0],sL=_l[1];var _m=useState(false),mt=_m[0],sM=_m[1];
+  useEffect(function(){setTimeout(function(){sM(true);},100);},[]);
+  var pr=props.profiles||{};
+  function go(){sE("");sL(true);setTimeout(function(){var u=DEF_USERS[un];if(u&&u.pw===pw){var p=pr[un]||{};props.onLogin(Object.assign({username:un},u,p));}else sE("账号或密码错误");sL(false);},500);}
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#0F1729,#1B2A4A 40%,#2C3E6B 70%,#1B2A4A)",fontFamily:"Georgia,serif",position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",inset:0,opacity:.04,backgroundImage:"url(\"data:image/svg+xml,%3Csvg width='60' height='60' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='30' cy='30' r='1' fill='%23C9A96E'/%3E%3C/svg%3E\")"}}/>
+      <div style={{opacity:mt?1:0,transform:mt?"translateY(0)":"translateY(24px)",transition:"all .7s cubic-bezier(.16,1,.3,1)",width:460,zIndex:1}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{width:72,height:72,margin:"0 auto 12px",borderRadius:"50%",background:"linear-gradient(135deg,#C9A96E,#E8D5A3,#C9A96E)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,boxShadow:"0 8px 32px rgba(201,169,110,.35)"}}>🏛️</div>
+          <h1 style={{color:"#C9A96E",fontSize:28,fontWeight:700,margin:0,letterSpacing:8}}>政务日历</h1>
+          <p style={{color:"rgba(201,169,110,.4)",fontSize:11,marginTop:5,letterSpacing:3}}>GOVERNMENT CALENDAR 2026</p>
+          <div style={{marginTop:8,display:"inline-flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:20,background:CLOUD_OK?"rgba(16,185,129,.12)":"rgba(245,158,11,.12)",border:"1px solid "+(CLOUD_OK?"rgba(16,185,129,.25)":"rgba(245,158,11,.25)")}}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:CLOUD_OK?"#10B981":"#F59E0B",animation:CLOUD_OK?"blink 2s infinite":"none"}}/>
+            <span style={{fontSize:9,color:CLOUD_OK?"#10B981":"#F59E0B"}}>{CLOUD_OK?"☁️ 云同步已启用":"💾 本地模式"}</span>
+          </div>
+        </div>
+        <div style={{background:"rgba(255,255,255,.03)",backdropFilter:"blur(40px)",borderRadius:20,padding:"32px 28px",border:"1px solid rgba(201,169,110,.12)",boxShadow:"0 20px 60px rgba(0,0,0,.4)"}}>
+          <div style={{marginBottom:18}}><label style={{display:"block",color:"rgba(201,169,110,.55)",fontSize:10,marginBottom:6,letterSpacing:2}}>账号</label>
+            <input value={un} onChange={function(e){sU(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")go();}} placeholder="请输入账号" style={{width:"100%",padding:"12px 14px",boxSizing:"border-box",background:"rgba(255,255,255,.05)",border:"1px solid rgba(201,169,110,.18)",borderRadius:11,color:"#E8D5A3",fontSize:14,outline:"none"}}/></div>
+          <div style={{marginBottom:18}}><label style={{display:"block",color:"rgba(201,169,110,.55)",fontSize:10,marginBottom:6,letterSpacing:2}}>密码</label>
+            <input type="password" value={pw} onChange={function(e){sP(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")go();}} placeholder="请输入密码" style={{width:"100%",padding:"12px 14px",boxSizing:"border-box",background:"rgba(255,255,255,.05)",border:"1px solid rgba(201,169,110,.18)",borderRadius:11,color:"#E8D5A3",fontSize:14,outline:"none"}}/></div>
+          {er&&<div style={{background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.25)",borderRadius:9,padding:"8px 12px",marginBottom:12,color:"#FCA5A5",fontSize:12,textAlign:"center"}}>{er}</div>}
+          <button onClick={go} disabled={ld} style={{width:"100%",padding:"13px",border:"none",borderRadius:11,cursor:"pointer",background:ld?"rgba(201,169,110,.3)":"linear-gradient(135deg,#C9A96E,#E8D5A3,#C9A96E)",color:"#1B2A4A",fontSize:15,fontWeight:700,letterSpacing:4,boxShadow:"0 4px 20px rgba(201,169,110,.3)"}}>{ld?"验证中...":"登 录 系 统"}</button>
+          <div style={{marginTop:18,borderTop:"1px solid rgba(201,169,110,.08)",paddingTop:14}}>
+            <div style={{color:"rgba(201,169,110,.35)",fontSize:9,textAlign:"center",marginBottom:8}}>快速登录 · 点击选择账号</div>
+            <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              {Object.keys(DEF_USERS).map(function(k){var v=DEF_USERS[k];var p=pr[k]||{};var nm=p.name||v.name;return(
+                <button key={k} onClick={function(){sU(k);sP(v.pw);}} style={{padding:"8px 12px",background:"rgba(255,255,255,.03)",border:"1px solid rgba(201,169,110,.08)",borderRadius:9,cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{width:28,height:28,borderRadius:"50%",background:v.main?"linear-gradient(135deg,#C9A96E,#E8D5A3)":"rgba(201,169,110,.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:v.main?"#1B2A4A":"#C9A96E",fontWeight:700}}>{nm[0]}</div>
+                    <div><div style={{color:"#E8D5A3",fontSize:12,fontWeight:600}}>{nm}{v.main&&<span style={{fontSize:8,marginLeft:5,padding:"1px 5px",borderRadius:3,background:"rgba(201,169,110,.2)",color:"#C9A96E"}}>主</span>}</div>
+                      <div style={{color:"rgba(201,169,110,.35)",fontSize:9}}>{p.dept||v.dept} · {p.role||v.role}</div></div></div>
+                  <div style={{color:"rgba(201,169,110,.3)",fontSize:10,fontFamily:"monospace"}}>{v.main?"••••••••":v.pw}</div>
+                </button>);})}
+            </div></div></div>
+        <div style={{display:"flex",justifyContent:"center",gap:16,marginTop:16}}>{["📱移动端","💻桌面端","🌐浏览器","☁️云同步"].map(function(t){return <span key={t} style={{color:"rgba(201,169,110,.2)",fontSize:9}}>{t}</span>;})}</div>
+      </div>
+      <style>{"input::placeholder{color:rgba(201,169,110,.2)}"}</style>
+    </div>);
+}
+
+/* ===== 主应用 ===== */
+function App(){
+  var _lo=useState(false),logged=_lo[0],sLog=_lo[1];
+  var _us=useState(null),user=_us[0],sUser=_us[1];
+  var _mo=useState(new Date().getMonth()),month=_mo[0],sMo=_mo[1];
+  var _sl=useState(null),sel=_sl[0],sSel=_sl[1];
+  var _ev=useState({}),events=_ev[0],sEv=_ev[1];
+  var _sa=useState(false),showAdd=_sa[0],sSA=_sa[1];
+  var _sd=useState(false),showDet=_sd[0],sSD=_sd[1];
+  var _ei=useState(null),editIdx=_ei[0],sEI=_ei[1];
+  var _ne=useState({title:"",category:"meeting",priority:0,status:0,time:"09:00",note:"",reminders:[]}),nEvt=_ne[0],sNE=_ne[1];
+  var _to=useState(null),toast=_to[0],sTo=_to[1];
+  var _sp=useState(false),showProf=_sp[0],sSP=_sp[1];
+  var _pf=useState({}),profForm=_pf[0],sPF=_pf[1];
+  var _sk=useState(0),splK=_sk[0],sSK=_sk[1];
+  var _stt=useState(null),splT=_stt[0],sST=_stt[1];
+  var _vw=useState("cal"),view=_vw[0],sVw=_vw[1];
+  var _sb=useState(true),sidebar=_sb[0],sSB=_sb[1];
+  var _nl=useState(false),showNL=_nl[0],sNL=_nl[1];
+  var _nt=useState(""),nlText=_nt[0],sNT=_nt[1];
+  var _nr=useState(null),nlRes=_nr[0],sNR=_nr[1];
+  var _li=useState(false),listening=_li[0],sLi=_li[1];
+  var _ss=useState(false),showSrch=_ss[0],sSS=_ss[1];
+  var _sq=useState(""),search=_sq[0],sSQ=_sq[1];
+  var _rm=useState([]),reminders=_rm[0],sRm=_rm[1];
+  var _sc=useState([]),shared=_sc[0],sSC=_sc[1];
+  var _pr=useState({}),profiles=_pr[0],sPr=_pr[1];
+  var _sy=useState(false),syncing=_sy[0],sSyn=_sy[1];
+  var _lt=useState(null),lastSync=_lt[0],sLS=_lt[1];
+
+  // 加载所有用户 profiles
+  useEffect(function(){(async function(){
+    var p={};
+    if(CLOUD_OK){
+      var all=await DB.cloudFetchAll();
+      Object.keys(DEF_USERS).forEach(function(k){
+        var val=all["prof-"+k];if(val)try{p[k]=JSON.parse(val);localStorage.setItem("gcal_prof-"+k,val);}catch(e){}
+      });
+    }else{
+      Object.keys(DEF_USERS).forEach(function(k){var r=DB.localGet("prof-"+k);if(r&&r.value)try{p[k]=JSON.parse(r.value);}catch(e){}});
+    }
+    sPr(p);
+  })();},[logged]);
+
+  // 加载当前用户数据
+  useEffect(function(){if(!user)return;(async function(){
+    try{var r=await DB.get("ev-"+user.username);if(r&&r.value)sEv(JSON.parse(r.value));}catch(e){}
+    try{var r2=await DB.get("rem-"+user.username);if(r2&&r2.value)sRm(JSON.parse(r2.value));}catch(e){}
+  })();},[user?user.username:null]);
+
+  // ★ 云同步轮询：每20秒从云端拉取最新数据
+  useEffect(function(){
+    if(!logged||!user||!CLOUD_OK)return;
+    var syncFn=async function(){
+      sSyn(true);
+      try{
+        var all=await DB.cloudFetchAll();
+        // 同步当前用户事件
+        var evVal=all["ev-"+user.username];
+        if(evVal){var parsed=JSON.parse(evVal);sEv(parsed);localStorage.setItem("gcal_ev-"+user.username,evVal);}
+        // 同步当前用户提醒
+        var remVal=all["rem-"+user.username];
+        if(remVal){sRm(JSON.parse(remVal));localStorage.setItem("gcal_rem-"+user.username,remVal);}
+        // 同步所有用户 profiles
+        var p={};Object.keys(DEF_USERS).forEach(function(k){var pv=all["prof-"+k];if(pv)try{p[k]=JSON.parse(pv);}catch(e){}});
+        sPr(p);
+        sLS(new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"}));
+      }catch(e){}
+      sSyn(false);
+    };
+    syncFn(); // 立即同步一次
+    var iv=setInterval(syncFn,20000);
+    return function(){clearInterval(iv);};
+  },[logged,user?user.username:null]);
+
+  // 提醒检查
+  useEffect(function(){if(!logged)return;var iv=setInterval(function(){var now=new Date();reminders.forEach(function(r){if(r.fired)return;if(now>=new Date(r.time)){notify("⏰ "+r.title,"remind");sRm(function(p){var u=p.map(function(x){return x.id===r.id?Object.assign({},x,{fired:true}):x;});svRm(u);return u;});}});},30000);return function(){clearInterval(iv);};},[logged,reminders]);
+
+  function sv(e){if(user)DB.set("ev-"+user.username,JSON.stringify(e));}
+  function svRm(r){if(user)DB.set("rem-"+user.username,JSON.stringify(r));}
+  function notify(msg,type){sTo({msg:msg,type:type||"ok"});setTimeout(function(){sTo(null);},3000);}
+
+  function onLogin(u){sUser(u);sLog(true);notify("欢迎，"+u.name);}
+  function savProf(){var up=Object.assign({},user,profForm);sUser(up);DB.set("prof-"+user.username,JSON.stringify(profForm));sPr(function(p){var n={};n[user.username]=profForm;return Object.assign({},p,n);});sSP(false);notify("已同步"+(CLOUD_OK?" (云端)":""));}
+
+  function addEv(){if(!nEvt.title.trim())return;var k=dkk(month,sel);var up=Object.assign({},events);var a=(up[k]||[]).slice();
+    if(editIdx!==null)a[editIdx]=Object.assign({},nEvt,{id:a[editIdx].id});else a.push(Object.assign({},nEvt,{id:Date.now()}));
+    up[k]=a;sEv(up);sv(up);
+    if(nEvt.reminders&&nEvt.reminders.length){var ed=new Date(2026,month,sel);var pts=(nEvt.time||"09:00").split(":");ed.setHours(parseInt(pts[0]),parseInt(pts[1]),0,0);
+      var nr=nEvt.reminders.map(function(mins,i){return{id:Date.now()+i,title:nEvt.title,time:new Date(ed.getTime()-mins*60000).toISOString(),fired:false};});
+      var ur=reminders.concat(nr);sRm(ur);svRm(ur);}
+    notify(editIdx!==null?"已更新":"已添加");sSA(false);sEI(null);sNE({title:"",category:"meeting",priority:0,status:0,time:"09:00",note:"",reminders:[]});}
+
+  function delEv(k,i){var up=Object.assign({},events);var a=(up[k]||[]).slice();a.splice(i,1);up[k]=a;sEv(up);sv(up);notify("已删除","warn");}
+  function togS(k,i){var up=Object.assign({},events);var a=(up[k]||[]).slice();a[i]=Object.assign({},a[i],{status:(a[i].status+1)%5});up[k]=a;sEv(up);sv(up);}
+  function togRem(mins){sNE(function(p){var r=(p.reminders||[]).slice();var i=r.indexOf(mins);if(i>=0)r.splice(i,1);else r.push(mins);return Object.assign({},p,{reminders:r});});}
+
+  function shareCal(){var s={user:user.name,events:{},time:new Date().toISOString()};Object.keys(events).forEach(function(k){if(events[k].length)s.events[k]=events[k];});DB.set("shared-"+user.username,JSON.stringify(s));notify("已共享"+(CLOUD_OK?" (其他用户可查看)":""));}
+  function loadShare(uname){(async function(){try{var r=await DB.get("shared-"+uname);if(r&&r.value){var d=JSON.parse(r.value);sSC([d]);notify("已加载 "+d.user+" 的日历");}else notify("该用户未共享","warn");}catch(e){notify("加载失败","warn");}})();}
+
+  function startVoice(){var SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){notify("浏览器不支持","warn");return;}var r=new SR();r.lang="zh-CN";r.continuous=false;r.interimResults=false;r.onresult=function(e){var t=e.results[0][0].transcript;sNT(t);sNR(parseNL(t));sLi(false);};r.onerror=function(){sLi(false);};r.onend=function(){sLi(false);};r.start();sLi(true);}
+  function applyNL(){if(!nlRes)return;sMo(nlRes.month);sSel(nlRes.day);sNE({title:nlRes.title,category:nlRes.category,priority:nlRes.priority,status:0,time:nlRes.time,note:"",reminders:[]});sNL(false);sSA(true);sSD(true);notify("已识别");}
+
+  function getSt(){var t=0,c=0,p=0,u=0;for(var d=1;d<=dIn(month);d++)(events[dkk(month,d)]||[]).forEach(function(e){t++;if(e.status===2)c++;if(e.status===0)p++;if(e.priority===2)u++;});return{t:t,c:c,p:p,u:u};}
+  function srch(){if(!search.trim())return[];var r=[];Object.keys(events).forEach(function(k){(events[k]||[]).forEach(function(e){if(e.title.indexOf(search)>=0)r.push(Object.assign({},e,{dk:k}));});});return r;}
+  function kanban(){var items=[];for(var mm=0;mm<12;mm++)for(var dd=1;dd<=dIn(mm);dd++)(events[dkk(mm,dd)]||[]).forEach(function(e){items.push(Object.assign({},e,{m:mm,d:dd}));});return items;}
+
+  if(!logged)return <LoginPage onLogin={onLogin} profiles={profiles}/>;
+
+  var dc=dIn(month),fd=fDay(month),grid=[];for(var ii=0;ii<fd;ii++)grid.push(null);for(var dd=1;dd<=dc;dd++)grid.push(dd);while(grid.length%7)grid.push(null);
+  var stats=getSt(),detEvts=sel?(events[dkk(month,sel)]||[]):[],selH=sel?gH(month,sel):null,theme=selH?THEMES[selH.t]:null,sr=srch(),kb=kanban();
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",background:"#F8F7F4",fontFamily:"sans-serif",position:"relative"}}>
+      {toast&&<div style={{position:"fixed",top:16,right:16,zIndex:9999,background:toast.type==="warn"?"#FEF3C7":toast.type==="remind"?"#EDE9FE":"#D1FAE5",color:toast.type==="warn"?"#92400E":toast.type==="remind"?"#5B21B6":"#065F46",padding:"10px 20px",borderRadius:11,fontSize:12,fontWeight:500,boxShadow:"0 8px 28px rgba(0,0,0,.1)",animation:"slideIn .3s ease-out"}}>{toast.msg}</div>}
+
+      {/* 侧边栏 */}
+      <div style={{width:sidebar?236:0,minHeight:"100vh",background:"linear-gradient(180deg,#1B2A4A,#152038)",transition:"width .35s cubic-bezier(.16,1,.3,1)",overflow:"hidden",flexShrink:0,boxShadow:"3px 0 16px rgba(0,0,0,.06)"}}>
+        <div style={{width:236,padding:"20px 14px",display:"flex",flexDirection:"column",height:"100vh",boxSizing:"border-box"}}>
+          <div style={{background:"rgba(255,255,255,.05)",borderRadius:12,padding:"14px 12px",marginBottom:14,border:"1px solid rgba(201,169,110,.08)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:9}}>
+              <div style={{width:36,height:36,borderRadius:"50%",background:"linear-gradient(135deg,#C9A96E,#E8D5A3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:700,color:"#1B2A4A"}}>{(user.name||"")[0]}</div>
+              <div style={{minWidth:0,flex:1}}><div style={{color:"#E8D5A3",fontSize:13,fontWeight:700}}>{user.name}</div><div style={{color:"rgba(201,169,110,.4)",fontSize:9}}>{user.dept} · {user.role}</div></div></div>
+            <div style={{display:"flex",gap:5}}>
+              <button onClick={function(){sPF({name:user.name,role:user.role,dept:user.dept});sSP(true);}} style={{flex:1,padding:"6px",background:"rgba(201,169,110,.08)",border:"1px solid rgba(201,169,110,.12)",borderRadius:6,color:"#C9A96E",fontSize:10,cursor:"pointer"}}>修改</button>
+              <button onClick={function(){sLog(false);sUser(null);sEv({});}} style={{flex:1,padding:"6px",background:"rgba(239,68,68,.06)",border:"1px solid rgba(239,68,68,.12)",borderRadius:6,color:"#FCA5A5",fontSize:10,cursor:"pointer"}}>退出</button></div></div>
+
+          {/* 云同步状态 */}
+          <div style={{display:"flex",alignItems:"center",gap:5,padding:"6px 10px",marginBottom:10,borderRadius:7,background:CLOUD_OK?"rgba(16,185,129,.06)":"rgba(245,158,11,.06)",border:"1px solid "+(CLOUD_OK?"rgba(16,185,129,.12)":"rgba(245,158,11,.12)")}}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:CLOUD_OK?(syncing?"#F59E0B":"#10B981"):"#F59E0B",animation:syncing?"pulse .8s infinite":"none",flexShrink:0}}/>
+            <span style={{fontSize:9,color:CLOUD_OK?"#10B981":"#F59E0B",flex:1}}>{CLOUD_OK?(syncing?"同步中...":"☁️ 云同步"):"💾 本地模式"}</span>
+            {lastSync&&CLOUD_OK&&<span style={{fontSize:8,color:"rgba(255,255,255,.25)"}}>{lastSync}</span>}
+          </div>
+
+          <div style={{display:"flex",gap:3,marginBottom:12,background:"rgba(0,0,0,.15)",borderRadius:8,padding:3}}>
+            {[{k:"cal",l:"📅日历"},{k:"kanban",l:"📋看板"},{k:"share",l:"🤝共享"}].map(function(v){return <button key={v.k} onClick={function(){sVw(v.k);}} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontSize:10,fontWeight:view===v.k?600:400,background:view===v.k?"rgba(201,169,110,.2)":"transparent",color:view===v.k?"#E8D5A3":"rgba(255,255,255,.35)"}}>{v.l}</button>;})}</div>
+          <div style={{flex:1,overflowY:"auto",marginBottom:10}}>
+            <div style={{color:"rgba(201,169,110,.35)",fontSize:9,letterSpacing:2,marginBottom:6,paddingLeft:4}}>月份导航</div>
+            {Array.from({length:12},function(_,m){return <button key={m} onClick={function(){sMo(m);sSel(null);sSD(false);}} style={{display:"flex",alignItems:"center",gap:7,width:"100%",padding:"7px 10px",marginBottom:2,border:"none",borderRadius:8,cursor:"pointer",background:m===month?"rgba(201,169,110,.13)":"transparent",color:m===month?"#E8D5A3":"rgba(255,255,255,.4)",fontSize:12,textAlign:"left"}}><span style={{width:4,height:4,borderRadius:"50%",background:m===month?"#C9A96E":"transparent"}}/>{m+1}月·{M_CN[m]}</button>;})}
+          </div>
+          <div style={{background:"rgba(255,255,255,.03)",borderRadius:10,padding:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+              {[{l:"总计",v:stats.t,c:"#C9A96E"},{l:"完成",v:stats.c,c:"#10B981"},{l:"待办",v:stats.p,c:"#3B82F6"},{l:"紧急",v:stats.u,c:"#EF4444"}].map(function(s,i){return <div key={i} style={{textAlign:"center",padding:"5px 0"}}><div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.v}</div><div style={{fontSize:8,color:"rgba(255,255,255,.3)"}}>{s.l}</div></div>;})}</div></div>
+        </div></div>
+
+      {/* 主区域 */}
+      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
+        <div style={{padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",background:"white",borderBottom:"1px solid #E8E4DE"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button onClick={function(){sSB(!sidebar);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:17,padding:4,color:"#1B2A4A"}}>☰</button>
+            <button onClick={function(){if(month>0){sMo(month-1);sSel(null);sSD(false);}}} disabled={month===0} style={{width:28,height:28,borderRadius:6,border:"1px solid #E8E4DE",background:"white",cursor:month===0?"default":"pointer",opacity:month===0?.3:1,fontSize:12,color:"#1B2A4A",display:"flex",alignItems:"center",justifyContent:"center"}}>◀</button>
+            <h1 style={{margin:0,fontSize:18,color:"#1B2A4A",fontWeight:700,minWidth:150,textAlign:"center",fontFamily:"Georgia,serif"}}>2026年·{M_CN[month]}</h1>
+            <button onClick={function(){if(month<11){sMo(month+1);sSel(null);sSD(false);}}} disabled={month===11} style={{width:28,height:28,borderRadius:6,border:"1px solid #E8E4DE",background:"white",cursor:month===11?"default":"pointer",opacity:month===11?.3:1,fontSize:12,color:"#1B2A4A",display:"flex",alignItems:"center",justifyContent:"center"}}>▶</button></div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <button onClick={function(){sNL(true);}} style={{padding:"7px 12px",borderRadius:8,border:"1px solid #E8E4DE",background:"white",cursor:"pointer",fontSize:11,color:"#1B2A4A"}}>🧠 智能输入</button>
+            <div style={{position:"relative"}}>
+              <button onClick={function(){sSS(!showSrch);}} style={{width:32,height:32,borderRadius:8,border:"1px solid #E8E4DE",background:showSrch?"#1B2A4A":"white",cursor:"pointer",fontSize:13,color:showSrch?"white":"#1B2A4A",display:"flex",alignItems:"center",justifyContent:"center"}}>🔍</button>
+              {showSrch&&<div style={{position:"absolute",right:0,top:40,background:"white",borderRadius:12,padding:12,width:280,boxShadow:"0 10px 40px rgba(0,0,0,.1)",border:"1px solid #E8E4DE",zIndex:100,animation:"fadeIn .2s"}}>
+                <input value={search} onChange={function(e){sSQ(e.target.value);}} placeholder="搜索..." autoFocus style={{width:"100%",padding:"8px 10px",boxSizing:"border-box",border:"1px solid #E8E4DE",borderRadius:8,fontSize:12,outline:"none"}}/>
+                {sr.length>0&&<div style={{maxHeight:160,overflowY:"auto",marginTop:6}}>{sr.map(function(r,i){return <div key={i} style={{padding:"6px 8px",fontSize:11,borderBottom:"1px solid #F5F3EF"}}><b style={{color:"#1B2A4A"}}>{r.title}</b> <span style={{color:"#94A3B8",fontSize:9}}>{r.dk}</span></div>;})}</div>}
+              </div>}</div>
+            <button onClick={function(){if(!sel)sSel(1);sEI(null);sNE({title:"",category:"meeting",priority:0,status:0,time:"09:00",note:"",reminders:[]});sSA(true);}} style={{padding:"7px 14px",borderRadius:8,border:"none",cursor:"pointer",background:"linear-gradient(135deg,#1B2A4A,#2C3E6B)",color:"white",fontSize:11,fontWeight:600,boxShadow:"0 2px 10px rgba(27,42,74,.2)"}}>+ 新增</button></div></div>
+
+        <div style={{flex:1,padding:"14px 20px",overflowY:"auto",display:"flex",gap:14}}>
+          {view==="cal"&&<>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>{CATS.map(function(c){return <span key={c.k} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"3px 8px",borderRadius:5,background:c.b,fontSize:9,color:c.c,fontWeight:500}}>{c.i}{c.l}</span>;})}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:2}}>{WD.map(function(d,i){return <div key={d} style={{textAlign:"center",padding:"8px 0",fontSize:11,fontWeight:600,color:i>=5?(i===6?"#DC2626":"#3B82F6"):"#64748B",background:i>=5?"#FEF7F0":"#F1F0ED",borderRadius:i===0?"9px 0 0 0":i===6?"0 9px 0 0":"0"}}>周{d}</div>;})}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
+                {grid.map(function(day,idx){
+                  if(day===null)return <div key={idx} style={{background:"#F5F3EF",minHeight:76}}/>;
+                  var h=gH(month,day),we=isWE(month,day),mu=isMU(month,day),s=sel===day;
+                  var _now=new Date();var isT=(_now.getFullYear()===2026&&month===_now.getMonth()&&day===_now.getDate());
+                  var de=events[dkk(month,day)]||[];
+                  return <div key={idx} onClick={function(){sSel(day);sSD(true);if(h){sST(h.t);sSK(function(k){return k+1;});}}}
+                    style={{minHeight:76,padding:"4px 5px",cursor:"pointer",position:"relative",overflow:"hidden",
+                    background:s?"#1B2A4A":h?"#FEF7F0":mu?"#FFFBEB":we?"#FEFCF9":"white",transition:"all .2s",outline:isT&&!s?"2px solid #C9A96E":"none",outlineOffset:"-2px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
+                      <span style={{fontSize:13,fontWeight:isT?800:600,color:s?"white":h?"#DC2626":we?"#3B82F6":"#1B2A4A"}}>{day}</span>
+                      <div style={{display:"flex",gap:2}}>
+                        {mu&&<span style={{fontSize:6,padding:"1px 3px",borderRadius:3,background:s?"rgba(245,158,11,.3)":"#FEF3C7",color:s?"#FCD34D":"#D97706"}}>补班</span>}
+                        {h&&<span style={{fontSize:6,padding:"1px 3px",borderRadius:3,maxWidth:36,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",background:s?"rgba(255,255,255,.1)":"#FEE2E2",color:s?"#FCA5A5":"#DC2626"}}>{h.e}{h.n}</span>}
+                        {isT&&<span style={{fontSize:6,padding:"1px 3px",borderRadius:3,background:s?"rgba(201,169,110,.2)":"#C9A96E",color:s?"#C9A96E":"white",fontWeight:700}}>今</span>}
+                      </div></div>
+                    <div style={{display:"flex",flexDirection:"column",gap:1}}>{de.slice(0,3).map(function(ev,i){var cat=CATS.find(function(c){return c.k===ev.category;})||CATS[0];return <div key={i} style={{fontSize:8,padding:"1px 3px",borderRadius:3,background:s?cat.c+"33":cat.b,color:s?"white":cat.c,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",borderLeft:"2px solid "+cat.c,opacity:ev.status>=2?.5:1}}>{STA[ev.status].i} {ev.title}</div>;})}{de.length>3&&<div style={{fontSize:7,color:s?"rgba(255,255,255,.5)":"#94A3B8",textAlign:"center"}}>+{de.length-3}</div>}</div>
+                  </div>;})}</div></div>
+
+            {showDet&&sel&&<div style={{width:280,flexShrink:0,borderRadius:14,border:"1px solid #E8E4DE",overflow:"hidden",animation:"slideR .3s ease-out",display:"flex",flexDirection:"column",maxHeight:"calc(100vh - 110px)",background:"white"}}>
+              <div style={{padding:"16px 14px",position:"relative",overflow:"hidden",minHeight:theme?120:80,background:theme?theme.bg:"linear-gradient(135deg,#1B2A4A,#2C3E6B)",color:"white"}}>
+                <Splash type={splT} trigger={splK}/>
+                <button onClick={function(){sSD(false);}} style={{position:"absolute",top:8,right:8,background:"rgba(255,255,255,.1)",border:"none",borderRadius:6,width:24,height:24,cursor:"pointer",color:"white",fontSize:12,zIndex:20,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+                <div style={{position:"relative",zIndex:5}}>
+                  <div style={{fontSize:30,fontWeight:700,fontFamily:"Georgia,serif",lineHeight:1}}>{sel}<span style={{fontSize:13,fontWeight:400,marginLeft:2}}>日</span>{selH&&<span style={{fontSize:16,marginLeft:6}}>{selH.e}</span>}</div>
+                  <div style={{fontSize:11,opacity:.6,marginTop:3}}>2026年{month+1}月{sel}日{selH&&<span style={{marginLeft:5,background:"rgba(255,255,255,.12)",padding:"1px 6px",borderRadius:3,fontSize:9}}>{selH.n}</span>}</div>
+                  {theme&&<div style={{marginTop:8,padding:"6px 10px",background:"rgba(255,255,255,.05)",borderRadius:7,borderLeft:"2px solid "+theme.a,animation:"fadeIn .6s .3s both"}}><div style={{fontSize:11,color:theme.tx,fontStyle:"italic",fontFamily:"Georgia,serif"}}>「{theme.p}」</div>{theme.au&&<div style={{fontSize:8,color:theme.tx,opacity:.5,textAlign:"right"}}>——{theme.au}</div>}</div>}
+                </div>
+                <button onClick={function(){sEI(null);sNE({title:"",category:"meeting",priority:0,status:0,time:"09:00",note:"",reminders:[]});sSA(true);}} style={{marginTop:8,padding:"5px 12px",background:"rgba(201,169,110,.18)",border:"1px solid rgba(201,169,110,.2)",borderRadius:6,color:"#E8D5A3",fontSize:10,cursor:"pointer",fontWeight:600,position:"relative",zIndex:5}}>+ 添加</button></div>
+              <div style={{flex:1,overflowY:"auto",padding:10}}>
+                {detEvts.length===0?<div style={{textAlign:"center",padding:28,color:"#94A3B8"}}><div style={{fontSize:28,opacity:.2}}>📋</div><div style={{fontSize:12}}>暂无</div></div>
+                :detEvts.map(function(ev,i){var cat=CATS.find(function(c){return c.k===ev.category;})||CATS[0];return(
+                  <div key={ev.id||i} style={{padding:10,borderRadius:10,marginBottom:7,border:"1px solid "+cat.c+"18",background:cat.b,opacity:ev.status>=2?.6:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4}}>
+                      <span style={{fontSize:12}}>{cat.i}</span><span style={{fontSize:12,fontWeight:600,color:"#1B2A4A",flex:1,textDecoration:ev.status===2||ev.status===4?"line-through":"none"}}>{ev.title}</span>
+                      {ev.time&&<span style={{fontSize:8,color:"#94A3B8",background:"#F1F5F9",padding:"1px 5px",borderRadius:3}}>⏱{ev.time}</span>}</div>
+                    <div style={{display:"flex",gap:3,flexWrap:"wrap",marginBottom:6}}>
+                      <span style={{fontSize:8,padding:"1px 5px",borderRadius:3,background:cat.c+"10",color:cat.c}}>{cat.l}</span>
+                      <span style={{fontSize:8,padding:"1px 5px",borderRadius:3,background:ev.priority===2?"#FEE2E2":ev.priority===1?"#FEF3C7":"#F1F5F9",color:ev.priority===2?"#DC2626":ev.priority===1?"#D97706":"#64748B"}}>{PRI[ev.priority]}</span>
+                      {ev.reminders&&ev.reminders.length>0&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:3,background:"#EDE9FE",color:"#7C3AED"}}>🔔×{ev.reminders.length}</span>}</div>
+                    {ev.note&&<div style={{fontSize:9,color:"#64748B",marginBottom:6,padding:"4px 6px",background:"rgba(255,255,255,.5)",borderRadius:5}}>{ev.note}</div>}
+                    <div style={{display:"flex",gap:4,justifyContent:"space-between"}}>
+                      <button onClick={function(e){e.stopPropagation();togS(dkk(month,sel),i);}} style={{padding:"3px 8px",borderRadius:4,border:"none",cursor:"pointer",fontSize:9,background:STA[ev.status].c+"12",color:STA[ev.status].c}}>{STA[ev.status].i} {STA[ev.status].l}</button>
+                      <div style={{display:"flex",gap:3}}>
+                        <button onClick={function(e){e.stopPropagation();sEI(i);sNE(Object.assign({},ev));sSA(true);}} style={{padding:"3px 7px",borderRadius:4,border:"1px solid #E8E4DE",background:"white",cursor:"pointer",fontSize:9,color:"#64748B"}}>编辑</button>
+                        <button onClick={function(e){e.stopPropagation();delEv(dkk(month,sel),i);}} style={{padding:"3px 7px",borderRadius:4,border:"1px solid #FEE2E2",background:"#FEF2F2",cursor:"pointer",fontSize:9,color:"#DC2626"}}>删除</button></div></div></div>);})}
+              </div></div>}
+          </>}
+
+          {view==="kanban"&&<div style={{flex:1,display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,alignContent:"start"}}>
+            {STA.map(function(st,si){var items=kb.filter(function(e){return e.status===si;});return(
+              <div key={si} style={{background:"white",borderRadius:12,border:"1px solid #E8E4DE",overflow:"hidden"}}>
+                <div style={{padding:"10px 12px",borderBottom:"3px solid "+st.c,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:12,fontWeight:700,color:"#1B2A4A"}}>{st.i} {st.l}</span>
+                  <span style={{fontSize:10,padding:"2px 8px",borderRadius:10,background:st.c+"15",color:st.c,fontWeight:600}}>{items.length}</span></div>
+                <div style={{padding:8,maxHeight:"calc(100vh - 200px)",overflowY:"auto"}}>
+                  {items.length===0?<div style={{textAlign:"center",padding:20,color:"#CBD5E1",fontSize:11}}>空</div>
+                  :items.map(function(ev,i){var cat=CATS.find(function(c){return c.k===ev.category;})||CATS[0];return(
+                    <div key={i} onClick={function(){sMo(ev.m);sSel(ev.d);sSD(true);sVw("cal");}} style={{padding:9,borderRadius:8,marginBottom:5,background:cat.b,border:"1px solid "+cat.c+"18",cursor:"pointer"}}>
+                      <div style={{fontSize:11,fontWeight:600,color:"#1B2A4A",marginBottom:2}}>{cat.i} {ev.title}</div>
+                      <div style={{fontSize:8,color:"#94A3B8"}}>{ev.m+1}月{ev.d}日{ev.time?" ⏱"+ev.time:""}</div></div>);})}</div></div>);})}</div>}
+
+          {view==="share"&&<div style={{flex:1,maxWidth:600}}>
+            <div style={{background:"white",borderRadius:14,padding:20,border:"1px solid #E8E4DE",marginBottom:16}}>
+              <h3 style={{margin:"0 0 10px",fontSize:16,color:"#1B2A4A"}}>📤 共享我的日历</h3>
+              <p style={{fontSize:12,color:"#64748B",marginBottom:14}}>将日程分享给同事查看{CLOUD_OK?"（云端同步，所有用户可见）":""}。</p>
+              <button onClick={shareCal} style={{padding:"10px 24px",borderRadius:9,border:"none",cursor:"pointer",background:"linear-gradient(135deg,#1B2A4A,#2C3E6B)",color:"white",fontSize:13,fontWeight:600}}>发布共享</button></div>
+            <div style={{background:"white",borderRadius:14,padding:20,border:"1px solid #E8E4DE"}}>
+              <h3 style={{margin:"0 0 10px",fontSize:16,color:"#1B2A4A"}}>📥 查看同事日历</h3>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                {Object.keys(DEF_USERS).filter(function(k){return k!==user.username;}).map(function(k){var v=DEF_USERS[k];var p=profiles[k]||{};return(
+                  <button key={k} onClick={function(){loadShare(k);}} style={{padding:12,borderRadius:10,border:"1px solid #E8E4DE",background:"#F8F7F4",cursor:"pointer",textAlign:"left"}}>
+                    <div style={{fontSize:13,fontWeight:600,color:"#1B2A4A"}}>{p.name||v.name}</div><div style={{fontSize:10,color:"#94A3B8"}}>{p.dept||v.dept}</div></button>);})}</div>
+              {shared.length>0&&<div style={{marginTop:14,padding:12,background:"#F8F7F4",borderRadius:10}}>
+                <div style={{fontSize:12,fontWeight:600,color:"#1B2A4A",marginBottom:8}}>📅 {shared[0].user} 的日程</div>
+                {Object.keys(shared[0].events||{}).slice(0,8).map(function(k){return <div key={k} style={{marginBottom:6}}><div style={{fontSize:10,color:"#64748B",fontWeight:600}}>{k}</div>{(shared[0].events[k]||[]).map(function(e,i){var cat=CATS.find(function(c){return c.k===e.category;})||CATS[0];return <div key={i} style={{fontSize:10,color:"#1B2A4A",paddingLeft:8,marginTop:2}}>{cat.i} {e.time} {e.title}</div>;})}</div>;})}</div>}
+            </div></div>}
+        </div></div>
+
+      {/* 新增/编辑弹窗 */}
+      {showAdd&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,animation:"fadeIn .2s"}} onClick={function(){sSA(false);}}>
+        <div onClick={function(e){e.stopPropagation();}} style={{background:"white",borderRadius:16,width:420,maxHeight:"85vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.2)",animation:"modalIn .3s cubic-bezier(.16,1,.3,1)"}}>
+          <div style={{padding:"16px 20px 12px",borderBottom:"1px solid #F1F0ED",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <h3 style={{margin:0,fontSize:16,color:"#1B2A4A"}}>{editIdx!==null?"编辑事项":"新增事项"}</h3>
+            <button onClick={function(){sSA(false);}} style={{width:28,height:28,borderRadius:6,border:"none",background:"#F5F3EF",cursor:"pointer",fontSize:14,color:"#64748B",display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button></div>
+          <div style={{padding:"14px 20px 20px"}}>
+            <div style={{background:"#F8F7F4",borderRadius:8,padding:"7px 10px",marginBottom:12,fontSize:11,color:"#64748B"}}>📅 2026年{month+1}月{sel}日</div>
+            <div style={{marginBottom:12}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>标题 *</label>
+              <input value={nEvt.title} onChange={function(e){sNE(Object.assign({},nEvt,{title:e.target.value}));}} placeholder="事项标题" autoFocus style={{width:"100%",padding:"9px 10px",boxSizing:"border-box",border:"1px solid #E8E4DE",borderRadius:8,fontSize:13,outline:"none"}}/></div>
+            <div style={{marginBottom:12}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>分类</label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>{CATS.map(function(cat){return <button key={cat.k} onClick={function(){sNE(Object.assign({},nEvt,{category:cat.k}));}} style={{padding:"7px 8px",borderRadius:7,cursor:"pointer",border:nEvt.category===cat.k?"2px solid "+cat.c:"2px solid #E8E4DE",background:nEvt.category===cat.k?cat.b:"white",fontSize:11,color:nEvt.category===cat.k?cat.c:"#64748B",fontWeight:nEvt.category===cat.k?600:400,display:"flex",alignItems:"center",gap:4}}>{cat.i}{cat.l}</button>;})}</div></div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+              <div><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>时间</label><input type="time" value={nEvt.time} onChange={function(e){sNE(Object.assign({},nEvt,{time:e.target.value}));}} style={{width:"100%",padding:8,boxSizing:"border-box",border:"1px solid #E8E4DE",borderRadius:8,fontSize:12,outline:"none"}}/></div>
+              <div><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>优先级</label><div style={{display:"flex",gap:4}}>{PRI.map(function(p,i){return <button key={i} onClick={function(){sNE(Object.assign({},nEvt,{priority:i}));}} style={{flex:1,padding:"8px 0",borderRadius:6,cursor:"pointer",fontSize:10,border:nEvt.priority===i?"2px solid":"2px solid #E8E4DE",borderColor:nEvt.priority===i?(i===2?"#DC2626":i===1?"#D97706":"#94A3B8"):"#E8E4DE",background:nEvt.priority===i?(i===2?"#FEF2F2":i===1?"#FFFBEB":"#F8FAFC"):"white",color:nEvt.priority===i?(i===2?"#DC2626":i===1?"#D97706":"#64748B"):"#94A3B8",fontWeight:nEvt.priority===i?600:400}}>{p}</button>;})}</div></div></div>
+            <div style={{marginBottom:12}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>🔔 智能提醒（多选）</label>
+              <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{REM_OPTS.map(function(r){var on=(nEvt.reminders||[]).indexOf(r.m)>=0;return <button key={r.m} onClick={function(){togRem(r.m);}} style={{padding:"5px 9px",borderRadius:6,cursor:"pointer",fontSize:10,border:on?"2px solid #7C3AED":"2px solid #E8E4DE",background:on?"#EDE9FE":"white",color:on?"#7C3AED":"#94A3B8",fontWeight:on?600:400}}>{on?"🔔":"🔕"} {r.l}</button>;})}</div></div>
+            <div style={{marginBottom:12}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>状态</label>
+              <div style={{display:"flex",gap:3}}>{STA.map(function(s,i){return <button key={i} onClick={function(){sNE(Object.assign({},nEvt,{status:i}));}} style={{flex:1,padding:"7px 0",borderRadius:6,cursor:"pointer",fontSize:9,border:nEvt.status===i?"2px solid "+s.c:"2px solid #E8E4DE",background:nEvt.status===i?s.c+"10":"white",color:nEvt.status===i?s.c:"#94A3B8",fontWeight:nEvt.status===i?600:400}}>{s.i} {s.l}</button>;})}</div></div>
+            <div style={{marginBottom:16}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>备注</label>
+              <textarea value={nEvt.note} onChange={function(e){sNE(Object.assign({},nEvt,{note:e.target.value}));}} placeholder="补充信息..." rows={2} style={{width:"100%",padding:"8px 10px",boxSizing:"border-box",border:"1px solid #E8E4DE",borderRadius:8,fontSize:11,outline:"none",resize:"vertical",fontFamily:"inherit"}}/></div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={function(){sSA(false);}} style={{flex:1,padding:10,borderRadius:8,border:"1px solid #E8E4DE",background:"white",cursor:"pointer",fontSize:12,color:"#64748B"}}>取消</button>
+              <button onClick={addEv} style={{flex:2,padding:10,borderRadius:8,border:"none",background:nEvt.title.trim()?"linear-gradient(135deg,#1B2A4A,#2C3E6B)":"#E8E4DE",cursor:nEvt.title.trim()?"pointer":"default",color:nEvt.title.trim()?"white":"#94A3B8",fontSize:12,fontWeight:600}}>{editIdx!==null?"保存":"确认"}</button></div>
+          </div></div></div>}
+
+      {/* 智能输入弹窗 */}
+      {showNL&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,animation:"fadeIn .2s"}} onClick={function(){sNL(false);}}>
+        <div onClick={function(e){e.stopPropagation();}} style={{background:"white",borderRadius:16,width:440,boxShadow:"0 20px 60px rgba(0,0,0,.2)",animation:"modalIn .3s cubic-bezier(.16,1,.3,1)"}}>
+          <div style={{padding:"16px 20px 12px",borderBottom:"1px solid #F1F0ED"}}><h3 style={{margin:0,fontSize:16,color:"#1B2A4A"}}>🧠 智能输入</h3></div>
+          <div style={{padding:"14px 20px 20px"}}>
+            <p style={{fontSize:11,color:"#64748B",marginBottom:12,lineHeight:1.6}}>自然语言描述，自动识别。例：「明天上午10点开会」「3月15日培训」</p>
+            <div style={{display:"flex",gap:6,marginBottom:14}}>
+              <input value={nlText} onChange={function(e){sNT(e.target.value);if(e.target.value.trim())sNR(parseNL(e.target.value));else sNR(null);}} placeholder="输入描述..." autoFocus onKeyDown={function(e){if(e.key==="Enter"&&nlRes)applyNL();}} style={{flex:1,padding:"10px 12px",border:"1px solid #E8E4DE",borderRadius:9,fontSize:13,outline:"none"}}/>
+              <button onClick={startVoice} style={{width:42,height:42,borderRadius:9,border:"none",cursor:"pointer",fontSize:18,background:listening?"#EF4444":"linear-gradient(135deg,#1B2A4A,#2C3E6B)",color:"white",display:"flex",alignItems:"center",justifyContent:"center",animation:listening?"pulse 1s infinite":"none"}}>{listening?"⏹":"🎤"}</button></div>
+            {listening&&<div style={{textAlign:"center",padding:8,color:"#EF4444",fontSize:12,animation:"pulse 1s infinite"}}>🎙️ 聆听中...</div>}
+            {nlRes&&<div style={{background:"#F8F7F4",borderRadius:10,padding:14,marginBottom:14,border:"1px solid #E8E4DE"}}>
+              <div style={{fontSize:11,color:"#64748B",marginBottom:8,fontWeight:600}}>✨ 识别结果</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12}}>
+                <div><span style={{color:"#94A3B8",fontSize:10}}>标题</span><br/><b style={{color:"#1B2A4A"}}>{nlRes.title}</b></div>
+                <div><span style={{color:"#94A3B8",fontSize:10}}>日期</span><br/><b style={{color:"#1B2A4A"}}>{nlRes.month+1}月{nlRes.day}日</b></div>
+                <div><span style={{color:"#94A3B8",fontSize:10}}>时间</span><br/><b style={{color:"#1B2A4A"}}>{nlRes.time}</b></div>
+                <div><span style={{color:"#94A3B8",fontSize:10}}>分类</span><br/><b style={{color:"#1B2A4A"}}>{(CATS.find(function(c){return c.k===nlRes.category;})||{}).i} {(CATS.find(function(c){return c.k===nlRes.category;})||{}).l}</b></div></div></div>}
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={function(){sNL(false);}} style={{flex:1,padding:10,borderRadius:8,border:"1px solid #E8E4DE",background:"white",cursor:"pointer",fontSize:12,color:"#64748B"}}>取消</button>
+              <button onClick={applyNL} disabled={!nlRes} style={{flex:2,padding:10,borderRadius:8,border:"none",background:nlRes?"linear-gradient(135deg,#1B2A4A,#2C3E6B)":"#E8E4DE",cursor:nlRes?"pointer":"default",color:nlRes?"white":"#94A3B8",fontSize:12,fontWeight:600}}>确认创建</button></div></div></div></div>}
+
+      {/* 修改信息弹窗 */}
+      {showProf&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,animation:"fadeIn .2s"}} onClick={function(){sSP(false);}}>
+        <div onClick={function(e){e.stopPropagation();}} style={{background:"white",borderRadius:16,width:360,boxShadow:"0 20px 60px rgba(0,0,0,.2)",animation:"modalIn .3s cubic-bezier(.16,1,.3,1)"}}>
+          <div style={{padding:"16px 20px 10px",borderBottom:"1px solid #F1F0ED"}}><h3 style={{margin:0,fontSize:16,color:"#1B2A4A"}}>修改信息</h3><p style={{margin:"3px 0 0",fontSize:10,color:"#94A3B8"}}>同步到登录界面{CLOUD_OK?"和云端":""}</p></div>
+          <div style={{padding:"14px 20px 20px"}}>
+            <div style={{textAlign:"center",marginBottom:14}}><div style={{width:52,height:52,borderRadius:"50%",background:"linear-gradient(135deg,#C9A96E,#E8D5A3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700,color:"#1B2A4A",margin:"0 auto"}}>{(profForm.name||user.name||"")[0]}</div></div>
+            {[{k:"name",l:"姓名"},{k:"dept",l:"部门"},{k:"role",l:"职务"}].map(function(f){return <div key={f.k} style={{marginBottom:12}}><label style={{display:"block",fontSize:10,color:"#64748B",marginBottom:4}}>{f.l}</label><input value={profForm[f.k]||""} onChange={function(e){var u={};u[f.k]=e.target.value;sPF(Object.assign({},profForm,u));}} style={{width:"100%",padding:"9px 10px",boxSizing:"border-box",border:"1px solid #E8E4DE",borderRadius:8,fontSize:13,outline:"none"}}/></div>;})}
+            <div style={{display:"flex",gap:6}}><button onClick={function(){sSP(false);}} style={{flex:1,padding:10,borderRadius:8,border:"1px solid #E8E4DE",background:"white",cursor:"pointer",fontSize:12,color:"#64748B"}}>取消</button>
+              <button onClick={savProf} style={{flex:2,padding:10,borderRadius:8,border:"none",background:"linear-gradient(135deg,#1B2A4A,#2C3E6B)",cursor:"pointer",color:"white",fontSize:12,fontWeight:600}}>保存同步</button></div></div></div></div>}
+    </div>);
+}
+
+ReactDOM.render(React.createElement(App), document.getElementById("root"));
+</script>
+</body>
+</html>
