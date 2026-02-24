@@ -49,10 +49,9 @@ const {useState,useEffect,useCallback,useRef}=React;
   ║                                                              ║
   ║  5. 左侧 Project Settings → API → 复制以下 2 个值填入下方：     ║
   ╚══════════════════════════════════════════════════════════════╝*/
-
 const SUPABASE = {
-  url:  "https://vvugdhihtdhxpjqdqqza.supabase.co",  // ← 粘贴 Project URL
-  key:  "sb_publishable_kdO8V9PYdpfOm-9ahCoHbQ_HVJjnT-g",              // ← 粘贴 anon public key
+  url:  "https://vvugdhihtdhxpjqdqqza.supabase.co",
+  key:  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2dWdkaGlodGRoeHBqcWRxcXphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4OTU3MTIsImV4cCI6MjA4NzQ3MTcxMn0.WOHiDTbXWkV8aUNpDWtqdHGVwsJq6WqzPSJ2CGRlO88",
 };
 // 填入后自动启用云同步；留空则使用本地存储（单机模式）
 
